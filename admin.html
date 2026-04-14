@@ -80,6 +80,19 @@
             gap: 15px;
             margin-bottom: 20px;
         }
+        .notification-badge {
+            background: #ff4444;
+            color: white;
+            padding: 5px 12px;
+            border-radius: 30px;
+            font-size: 0.8rem;
+            font-weight: bold;
+            animation: blink 1s infinite;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
         .toast {
             position: fixed;
             bottom: 20px;
@@ -91,6 +104,20 @@
             border-radius: 12px;
             z-index: 1000;
             display: none;
+        }
+        .toast.show { display: block; animation: fadeInUp 0.3s; }
+        @keyframes fadeInUp {
+            from { transform: translateX(-50%) translateY(20px); opacity: 0; }
+            to { transform: translateX(-50%) translateY(0); opacity: 1; }
+        }
+        .sound-toggle {
+            background: #335588;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 20px;
+            color: white;
+            cursor: pointer;
+            font-size: 0.8rem;
         }
         @media (max-width: 700px) {
             th, td { font-size: 0.8rem; padding: 8px; }
@@ -114,26 +141,54 @@
                 <button class="btn refresh-btn" id="refreshDataBtn">REFRESH DATA</button>
                 <button class="btn refresh-btn" id="exportDataBtn" style="background:#335588;">EXPORT JSON</button>
                 <button class="btn refresh-btn" id="clearAllBtn" style="background:#882222;">HAPUS SEMUA</button>
+                <button class="sound-toggle" id="soundToggleBtn">🔊 SOUND ON</button>
             </div>
         </div>
         <div id="tableContainer">Loading data...</div>
+        <div id="notificationArea" style="margin-top: 15px; text-align: center;"></div>
     </div>
 </div>
 <div id="toastMsg" class="toast"></div>
 
 <script>
     const ADMIN_KEY = "142201";
-    // 🔴 GANTI DENGAN URL GOOGLE SCRIPT ANDA 🔴
     const GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbxRfgjkFEModhgySfUA_ry3LP2ywR1hcxNDt-EX2ezwXyOstVsOzsAQX8JPHhEMeajcew/exec";
 
     let currentData = [];
+    let lastDataHash = "";
+    let autoRefreshInterval = null;
+    let soundEnabled = true;
+    let audioContext = null;
+
+    function playNotificationSound() {
+        if (!soundEnabled) return;
+        try {
+            // Create beep sound using Web Audio API
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            oscillator.frequency.value = 880;
+            gainNode.gain.value = 0.3;
+            oscillator.start();
+            gainNode.gain.exponentialRampToValueAtTime(0.00001, audioContext.currentTime + 1);
+            oscillator.stop(audioContext.currentTime + 0.5);
+        } catch(e) { console.log("Audio not supported"); }
+    }
 
     function showToast(msg, isError = false) {
         const toast = document.getElementById('toastMsg');
         toast.textContent = msg;
         toast.style.borderLeftColor = isError ? '#ff4444' : '#4488ff';
-        toast.style.display = 'block';
-        setTimeout(() => toast.style.display = 'none', 3000);
+        toast.classList.add('show');
+        setTimeout(() => toast.classList.remove('show'), 3000);
+    }
+
+    function computeDataHash(data) {
+        return JSON.stringify(data.map(item => `${item.id}-${item.nomor}-${item.waktu}`));
     }
 
     async function fetchAllData() {
@@ -141,8 +196,7 @@
             const response = await fetch(`${GOOGLE_SHEET_URL}?action=getAll`);
             const data = await response.json();
             if (data.success && Array.isArray(data.data)) {
-                currentData = data.data;
-                return currentData;
+                return data.data;
             }
             return [];
         } catch (error) {
@@ -150,6 +204,36 @@
             const local = localStorage.getItem('antrian_backup_admin');
             return local ? JSON.parse(local) : [];
         }
+    }
+
+    async function checkForNewData() {
+        const newData = await fetchAllData();
+        const newHash = computeDataHash(newData);
+        
+        if (lastDataHash && newHash !== lastDataHash) {
+            // Ada data baru!
+            const oldCount = currentData.length;
+            const newCount = newData.length;
+            if (newCount > oldCount) {
+                const newEntries = newData.slice(oldCount);
+                newEntries.forEach(entry => {
+                    showToast(`🔔 ANTRIAN BARU! Nomor ${entry.nomor} - ID: ${entry.id}`);
+                    playNotificationSound();
+                });
+                // Tampilkan notifikasi di area khusus
+                const notifDiv = document.getElementById('notificationArea');
+                notifDiv.innerHTML = `<div class="notification-badge">📢 ADA ANTRIAN BARU! Total: ${newCount}</div>`;
+                setTimeout(() => {
+                    if (notifDiv.innerHTML.includes('ADA ANTRIAN BARU')) {
+                        notifDiv.innerHTML = '';
+                    }
+                }, 5000);
+            }
+        }
+        
+        currentData = newData;
+        lastDataHash = newHash;
+        renderTable();
     }
 
     async function deleteData(id, nomor) {
@@ -166,7 +250,7 @@
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
             });
             showToast(`Antrian nomor ${nomor} dihapus`);
-            await renderTable();
+            await checkForNewData();
         } catch (error) {
             currentData = currentData.filter(item => !(item.id === id && item.nomor == nomor));
             localStorage.setItem('antrian_backup_admin', JSON.stringify(currentData));
@@ -180,7 +264,7 @@
         try {
             await fetch(`${GOOGLE_SHEET_URL}?action=clearAll`, { mode: 'no-cors' });
             showToast('Semua data telah dihapus');
-            await renderTable();
+            await checkForNewData();
         } catch (error) {
             currentData = [];
             localStorage.setItem('antrian_backup_admin', '[]');
@@ -205,15 +289,14 @@
         showToast('Data berhasil diexport');
     }
 
-    async function renderTable() {
-        const data = await fetchAllData();
+    function renderTable() {
         const container = document.getElementById('tableContainer');
-        if (!data.length) {
+        if (!currentData.length) {
             container.innerHTML = '<p style="text-align:center; padding:40px;">Belum ada data antrian</p>';
             return;
         }
-        const sorted = [...data].sort((a,b) => a.nomor - b.nomor);
-        let html = `<td><thead><tr><th>NO. ANTRIAN</th><th>ID GAME</th><th>WAKTU</th><th>AKSI</th></tr></thead><tbody>`;
+        const sorted = [...currentData].sort((a,b) => a.nomor - b.nomor);
+        let html = `<table><thead><tr><th>NO. ANTRIAN</th><th>ID GAME</th><th>WAKTU</th><th>AKSI</th></tr></thead><tbody>`;
         sorted.forEach(item => {
             html += `<tr>
                         <td>${item.nomor}</td>
@@ -243,21 +326,36 @@
         });
     }
 
-    document.getElementById('loginAdminBtn').addEventListener('click', () => {
+    function startAutoRefresh() {
+        if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+        // Cek setiap 5 detik apakah ada antrian baru
+        autoRefreshInterval = setInterval(() => {
+            checkForNewData();
+        }, 5000);
+    }
+
+    document.getElementById('loginAdminBtn').addEventListener('click', async () => {
         const key = document.getElementById('adminKey').value;
         if (key === ADMIN_KEY) {
             document.getElementById('loginPanel').style.display = 'none';
             document.getElementById('adminPanel').style.display = 'block';
-            renderTable();
-            showToast('Akses diberikan, selamat datang owner');
+            await checkForNewData();
+            startAutoRefresh();
+            showToast('Akses diberikan, notifikasi otomatis aktif');
         } else {
             showToast('Key salah! Akses ditolak', true);
         }
     });
 
-    document.getElementById('refreshDataBtn').addEventListener('click', () => renderTable());
+    document.getElementById('refreshDataBtn').addEventListener('click', () => checkForNewData());
     document.getElementById('exportDataBtn').addEventListener('click', exportJSON);
     document.getElementById('clearAllBtn').addEventListener('click', clearAll);
+    
+    document.getElementById('soundToggleBtn').addEventListener('click', () => {
+        soundEnabled = !soundEnabled;
+        document.getElementById('soundToggleBtn').textContent = soundEnabled ? "🔊 SOUND ON" : "🔇 SOUND OFF";
+        showToast(`Suara notifikasi ${soundEnabled ? 'diaktifkan' : 'dimatikan'}`);
+    });
 </script>
 </body>
 </html>
